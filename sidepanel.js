@@ -164,6 +164,19 @@ function buildUniqueZipFilename(filename) {
   return `${baseName}_${yyyy}${mm}${dd}_${hh}${min}${ss}_${shortId}.zip`;
 }
 
+function buildRevisionResultZipFilename(sourceName, fallbackBase = "task") {
+  const clean = String(sourceName || "").trim();
+  const baseName = (clean ? clean.replace(/\.zip$/i, "") : fallbackBase).trim() || fallbackBase;
+  const versionMatch = baseName.match(/^(.*?)-v(\d+)$/i);
+
+  if (versionMatch) {
+    const nextVersion = Number(versionMatch[2]) + 1;
+    return `${versionMatch[1]}-v${nextVersion}.zip`;
+  }
+
+  return `${baseName}-v2.zip`;
+}
+
 function getChatGptUrl() {
   const raw = String(chatgptUrlInput.value || "").trim() || DEFAULT_CHATGPT_URL;
   if (!/^https?:\/\//i.test(raw)) {
@@ -2606,11 +2619,15 @@ async function persistRevisionState() {
     paused: Boolean(revisionSettings.paused)
   });
   await chrome.storage.local.set({
-    revisionJobs,
     revisionSessionRegistry,
     revisionListState,
     revisionSettings
   });
+  await chrome.storage.local.remove("revisionJobs");
+}
+
+function removeRevisionJobFromList(jobId) {
+  revisionJobs = revisionJobs.filter((job) => job.id !== jobId);
 }
 
 function getRevisionChatGptUrl() {
@@ -3270,10 +3287,11 @@ function pageStartChatGptPrompt(promptText, attachments) {
     return button;
   }
 
-  async function clickSendAndVerify(composer, assistantCountBefore) {
+  async function clickSendAndTrigger(composer, assistantCountBefore) {
     let sendButton = await waitForSendButton();
     let usedButton = false;
     let usedEnterFallback = false;
+    const sentAt = new Date().toISOString();
 
     if (sendButton && isButtonEnabled(sendButton)) {
       usedButton = true;
@@ -3293,22 +3311,14 @@ function pageStartChatGptPrompt(promptText, attachments) {
       submitEnter(composer);
     }
 
-    const verifyStart = Date.now();
-    while (Date.now() - verifyStart <= 15000) {
-      if (hasGenerationStarted(assistantCountBefore)) {
-        console.log("[s-project-extension][revision-page] chatgpt-send-verify", {
-          at: new Date().toISOString(),
-          ok: true,
-          elapsedMs: Date.now() - verifyStart,
-          usedButton,
-          usedEnterFallback
-        });
-        return { ok: true, usedButton, usedEnterFallback };
-      }
-      await sleep(500);
-    }
-
-    return { ok: false, usedButton, usedEnterFallback, error: "ChatGPT did not start responding after send." };
+    console.log("[s-project-extension][revision-page] chatgpt-send-verify", {
+      at: new Date().toISOString(),
+      ok: true,
+      assumedStarted: true,
+      usedButton,
+      usedEnterFallback
+    });
+    return { ok: true, usedButton, usedEnterFallback, assumedStarted: true, sentAt };
   }
 
   return (async () => {
@@ -3321,17 +3331,18 @@ function pageStartChatGptPrompt(promptText, attachments) {
     fillComposer(composer, String(promptText || ""));
     await sleep(250);
 
-    const sendResult = await clickSendAndVerify(composer, assistantCountBefore);
+    const sendResult = await clickSendAndTrigger(composer, assistantCountBefore);
     if (!sendResult.ok) throw new Error(sendResult.error || "Failed to send ChatGPT prompt.");
 
     console.log("[s-project-extension][revision-page] chatgpt-prompt-sent", {
       at: new Date().toISOString(),
       assistantCountBefore,
       usedButton: Boolean(sendResult.usedButton),
-      usedEnterFallback: Boolean(sendResult.usedEnterFallback)
+      usedEnterFallback: Boolean(sendResult.usedEnterFallback),
+      sentAt: sendResult.sentAt || null
     });
 
-    return { ok: true, assistantCountBefore, startedAt: new Date().toISOString() };
+    return { ok: true, assistantCountBefore, startedAt: new Date().toISOString(), sentAt: sendResult.sentAt || new Date().toISOString() };
   })();
 }
 
@@ -3602,6 +3613,19 @@ function pageFillRevisionFormFromJob(payload) {
     return true;
   }
 
+  function findCheckFeedbackButton() {
+    return Array.from(document.querySelectorAll("button")).find((btn) => {
+      const text = normalize(btn.innerText || btn.textContent || "").toLowerCase();
+      return text === "check feedback" || text.includes("check feedback");
+    }) || null;
+  }
+
+  function isButtonEnabled(button) {
+    if (!button) return false;
+    const ariaDisabled = String(button.getAttribute("aria-disabled") || "").toLowerCase();
+    return !button.disabled && ariaDisabled !== "true";
+  }
+
   return (async () => {
     const normalized = payload?.normalizedFillData || {};
     const opts = payload?.options || {};
@@ -3622,9 +3646,37 @@ function pageFillRevisionFormFromJob(payload) {
     setCheckbox("field-checkbox_evaluate_rubrics", Boolean(opts.enableGenerateRubricAfterUpload));
     setCheckbox("field-checkbox_send_to_reviewer", Boolean(opts.autoCheckSendReviewerAfterFixedUpload));
 
+    let checkButton = findCheckFeedbackButton();
+    console.log("[s-project-extension][revision-page] check-feedback-state", {
+      at: new Date().toISOString(),
+      found: Boolean(checkButton),
+      enabled: isButtonEnabled(checkButton)
+    });
+
+    const waitStart = Date.now();
+    while (checkButton && !isButtonEnabled(checkButton) && Date.now() - waitStart <= 20000) {
+      await sleep(500);
+      checkButton = findCheckFeedbackButton();
+    }
+
+    if (checkButton && isButtonEnabled(checkButton)) {
+      checkButton.click();
+      console.log("[s-project-extension][revision-page] check-feedback-clicked", {
+        at: new Date().toISOString(),
+        waitedMs: Date.now() - waitStart
+      });
+      await sleep(300);
+    } else {
+      console.log("[s-project-extension][revision-page] check-feedback-not-clicked", {
+        at: new Date().toISOString(),
+        found: Boolean(checkButton),
+        enabled: isButtonEnabled(checkButton)
+      });
+    }
+
     console.log("[s-project-extension][revision-page] fill-revision-form-complete", { at: new Date().toISOString() });
 
-    return { ok: true };
+    return { ok: true, checkFeedbackClicked: Boolean(checkButton && isButtonEnabled(checkButton)) };
   })();
 }
 
@@ -4014,6 +4066,10 @@ async function startRevisionJobFromListItem(listItem) {
 
       setRevisionStatus(job, revisionSettings.autoSendNoFixRevisions ? "done" : "ready_to_send_reviewer");
       await refreshRevisionUiAndPersist();
+      if (revisionSettings.autoSendNoFixRevisions) {
+        removeRevisionJobFromList(job.id);
+        await refreshRevisionUiAndPersist();
+      }
       return job;
     }
 
@@ -4115,6 +4171,16 @@ async function startRevisionJobFromListItem(listItem) {
     logRevision("session-registry-updated", job, { chatGptSessionUrl: job.chatGptSessionUrl });
 
     await refreshRevisionUiAndPersist();
+    const handoffDelayMs = 4000;
+    logRevision("waiting-chatgpt-handoff", job, {
+      message: "Handing off to the next task without waiting for ChatGPT completion.",
+      handoffDelayMs
+    });
+    setTimeout(() => {
+      processNextRevisionFromList().catch((err) => {
+        logRevision("waiting-chatgpt-handoff-error", job, { error: err?.message || String(err) });
+      });
+    }, handoffDelayMs);
     return job;
   } catch (err) {
     logRevision("job-error", job, { error: err?.message || String(err) });
@@ -4175,9 +4241,8 @@ async function processNextRevisionFromList() {
       blockedErrorListUuidCount: blockedErrorListUuids.size,
       scopedBatchCount: revisionBatchScopeUrls ? revisionBatchScopeUrls.size : 0
     });
-    for (let i = 0; i < Math.min(slots, candidates.length); i += 1) {
-      await startRevisionJobFromListItem(candidates[i]);
-    }
+    const selectedCandidates = candidates.slice(0, Math.min(slots, candidates.length));
+    await Promise.all(selectedCandidates.map((item) => startRevisionJobFromListItem(item)));
   } finally {
     revisionStarterBusy = false;
     logRevision("process-next-finished");
@@ -4223,7 +4288,10 @@ async function handleCompletedChatGptRevision(job) {
     setRevisionStatus(job, "downloading_revised_zip");
     await refreshRevisionUiAndPersist();
 
-    const filenameHint = `${(job.taskUuid || "task").slice(0, 12)}_revised.zip`;
+    const filenameHint = buildRevisionResultZipFilename(
+      job.sourceZipOriginalName || job.sourceZipDownloadedName,
+      (job.taskUuid || "task").slice(0, 12)
+    );
     logRevision("register-revised-zip-download", job, { filenameHint });
     await chrome.runtime.sendMessage({
       type: "REGISTER_EXPECTED_CHATGPT_DOWNLOAD",
@@ -4303,6 +4371,8 @@ async function handleCompletedChatGptRevision(job) {
     logRevision("revision-form-filled", job);
 
     setRevisionStatus(job, "done");
+    await refreshRevisionUiAndPersist();
+    removeRevisionJobFromList(job.id);
     await refreshRevisionUiAndPersist();
   } catch (err) {
     logRevision("handle-chatgpt-complete-error", job, { error: err?.message || String(err) });
@@ -4507,6 +4577,11 @@ async function handleRevisionJobAction(action, jobId) {
 
     if (action === "force-resend") {
       job.forceFullResend = !job.forceFullResend;
+      if (job.forceFullResend && job.taskUuid) {
+        delete revisionSessionRegistry[job.taskUuid];
+        job.chatGptSessionUrl = "";
+        logRevision("session-registry-forgotten", job, { taskUuid: job.taskUuid });
+      }
       await refreshRevisionUiAndPersist();
       return;
     }
@@ -4654,9 +4729,10 @@ if (resumeRevisionQueueBtn) {
 
 if (clearFinishedRevisionJobsBtn) {
   clearFinishedRevisionJobsBtn.addEventListener("click", async () => {
-    revisionJobs = revisionJobs.filter((job) => !REVISION_TERMINAL_STATUSES.has(job.status));
+    revisionJobs = [];
+    revisionBatchScopeUrls = null;
     await refreshRevisionUiAndPersist();
-    setStatus("Status: Cleared finished revision jobs", "ok");
+    setStatus("Status: Cleared jobs list", "ok");
   });
 }
 
@@ -4717,7 +4793,7 @@ chrome.storage.local
       if (lastNormalizedFillData.summaryText) summaryTextarea.value = lastNormalizedFillData.summaryText;
     }
 
-  revisionJobs = Array.isArray(savedRevisionJobs) ? savedRevisionJobs : [];
+  revisionJobs = [];
   revisionSessionRegistry = savedSessionRegistry && typeof savedSessionRegistry === "object" ? savedSessionRegistry : {};
   revisionListState = savedRevisionListState && typeof savedRevisionListState === "object"
     ? { ...revisionListState, ...savedRevisionListState }
