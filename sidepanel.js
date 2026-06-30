@@ -2858,6 +2858,8 @@ function pageExtractRevisionData() {
   function hasDownloadFileButton(field) {
     if (!field) return false;
     return Array.from(field.querySelectorAll("button, a")).some((el) => {
+      const ariaDisabled = String(el.getAttribute("aria-disabled") || "").toLowerCase();
+      if (el.disabled || ariaDisabled === "true") return false;
       const text = normalize(el.innerText || el.textContent || "");
       const title = normalize(el.getAttribute("title") || el.getAttribute("aria-label") || "");
       const hasDownloadIcon = Boolean(el.querySelector("svg.lucide-download, svg[class*='lucide-download']"));
@@ -3674,7 +3676,6 @@ function getMissingRevisionDataFields(extracted, job = null) {
   if (!String(extracted?.reviewerFeedbackText || "").trim()) missing.push("reviewerFeedbackText");
   if (!String(extracted?.rubricText || "").trim()) missing.push("rubricText");
   if (!String(extracted?.sourceZipFileName || "").trim()) missing.push("sourceZipFileName");
-  if (!extracted?.buildingErrorDownloadAvailable) missing.push("buildingErrorDownloadButton");
   return missing;
 }
 
@@ -3858,6 +3859,8 @@ async function startRevisionJobFromListItem(listItem) {
       job.buildingErrorDownloadedName = buildDownload.filename || buildName;
       job.buildingErrorFileApiUrl = buildFileApiUrl(job.buildingErrorDownloadedName);
       logRevision("building-error-downloaded", job, { filename: job.buildingErrorDownloadedName, fileApiUrl: job.buildingErrorFileApiUrl });
+    } else {
+      logRevision("building-error-skip-unavailable", job, { message: "No enabled difficulty check result download button was found." });
     }
 
     setRevisionStatus(job, "opening_chatgpt");
