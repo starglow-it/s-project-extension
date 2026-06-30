@@ -1,0 +1,237 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #f7f7f8;
+  color: #111827;
+}
+
+main {
+  padding: 16px;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0 0 16px;
+}
+
+.tab-row {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.tab-btn {
+  flex: 1;
+  background: #e5e7eb;
+  color: #111827;
+  border: 1px solid #d1d5db;
+}
+
+.tab-btn:hover {
+  background: #d1d5db;
+}
+
+.tab-btn.is-active {
+  background: #2563eb;
+  color: #ffffff;
+  border-color: #2563eb;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  background: #2563eb;
+  color: white;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 10px 12px;
+}
+
+button:hover {
+  background: #1d4ed8;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+button.small {
+  background: #374151;
+  padding: 8px 10px;
+  white-space: nowrap;
+}
+
+button.small:hover {
+  background: #1f2937;
+}
+
+button.primary-copy {
+  background: #16a34a;
+}
+
+button.primary-copy:hover {
+  background: #15803d;
+}
+
+.status {
+  margin: 14px 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: white;
+  border: 1px solid #e5e7eb;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.status.ok {
+  border-color: #16a34a;
+  color: #166534;
+}
+
+.status.warn {
+  border-color: #f59e0b;
+  color: #92400e;
+}
+
+.status.error {
+  border-color: #dc2626;
+  color: #991b1b;
+}
+
+.field {
+  margin: 14px 0;
+}
+
+.field.highlight {
+  padding: 12px;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  background: #f0fdf4;
+}
+
+label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+input:not([type="checkbox"]):not([type="radio"]),
+textarea {
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: white;
+  color: #111827;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  padding: 9px;
+}
+
+textarea {
+  min-height: 110px;
+  resize: vertical;
+}
+
+#summary {
+  min-height: 130px;
+}
+
+#formattedText {
+  min-height: 170px;
+}
+
+#chatgptUrl,
+#fileApiUrl {
+  min-height: 38px;
+}
+
+#reviewAhtMin,
+#reviewAhtMax {
+  min-height: 38px;
+}
+
+#chatgptJson {
+  min-height: 220px;
+}
+
+
+#startBtn {
+  width: 100%;
+}
+
+.secondary-action {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  background: #374151;
+}
+
+.secondary-action:hover {
+  background: #1f2937;
+}
+
+#revisionQueueSection .field label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-weight: 600;
+}
+
+#revisionQueueSection label input[type="checkbox"] {
+  width: auto;
+  margin-top: 2px;
+  margin-right: 0;
+  flex: 0 0 auto;
+}
+
+.revision-jobs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.revision-job-card {
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.revision-job-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.revision-job-actions button {
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+#revisionZipName {
+  min-height: 38px;
+}
+
+#revisionReviewerFeedback,
+#revisionSummary,
+#revisionRubric,
+#revisionDifficultyExplanation,
+#revisionSolutionExplanation,
+#revisionVerificationExplanation {
+  min-height: 90px;
+}

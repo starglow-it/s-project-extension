@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "S-Project Task Zip + Rubric Grabber",
+  "version": "1.2.8",
+  "description": "Sidebar extension that extracts zip filename, downloads the zip, reads difficulty, and copies summary/rubric text and reviewer-ready formatted text.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "downloads",
+    "sidePanel",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Task Grabber"
+  }
+}

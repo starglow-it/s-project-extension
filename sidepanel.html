@@ -1,0 +1,206 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Task Grabber</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Task Grabber</h1>
+
+      <div class="tab-row" role="tablist" aria-label="Sidebar Features">
+        <button id="reviewTabBtn" class="tab-btn is-active" role="tab" aria-selected="true" aria-controls="reviewTabContent">Review</button>
+        <button id="revisionTabBtn" class="tab-btn" role="tab" aria-selected="false" aria-controls="revisionTabContent">Revision</button>
+      </div>
+
+      <div id="reviewTabContent" role="tabpanel" aria-labelledby="reviewTabBtn">
+        <button id="startBtn">Get Data</button>
+        <button id="downloadSourceBtn" class="secondary-action" disabled>Download Source</button>
+        <button id="downloadCheckingFilesBtn" class="secondary-action">Download Checking files</button>
+        <button id="loadTestModeBtn" class="secondary-action">Load Test Mode</button>
+        <button id="runChatGptBtn" class="secondary-action">Run ChatGPT (active tab)</button>
+        <button id="fillSnorkelBtn" class="secondary-action">Fill Snorkel (active tab)</button>
+        <button id="autoRunBtn" class="secondary-action">Auto Run (Snorkel -> ChatGPT -> Fill)</button>
+
+        <section class="status">
+          <div id="statusText">Ready.</div>
+        </section>
+
+        <section class="field">
+          <label>Zipfile name</label>
+          <div class="row">
+            <input id="zipName" readonly />
+            <button id="copyZipBtn" class="small">Copy</button>
+          </div>
+        </section>
+
+        <section class="field">
+          <label>ChatGPT S-Project-Review URL</label>
+          <input id="chatgptUrl" placeholder="https://chatgpt.com/" />
+        </section>
+
+        <section class="field">
+          <label>File API URL</label>
+          <div class="row">
+            <input id="fileApiUrl" readonly />
+            <button id="copyFileApiUrlBtn" class="small">Copy URL</button>
+          </div>
+        </section>
+
+        <section class="field">
+          <label>Review Time (AHT) Random Range</label>
+          <div class="row">
+            <input id="reviewAhtMin" type="number" min="1" step="1" placeholder="Min (e.g. 10)" />
+            <input id="reviewAhtMax" type="number" min="1" step="1" placeholder="Max (e.g. 20)" />
+          </div>
+        </section>
+
+        <section class="field">
+          <label>Reviewer Feedback</label>
+          <textarea id="reviewerFeedback" readonly></textarea>
+          <div class="row">
+            <button id="copyReviewerFeedbackBtn" class="small">Copy Reviewer Feedback</button>
+          </div>
+        </section>
+
+        <section class="field">
+          <label>Summary text</label>
+          <textarea id="summary" readonly></textarea>
+          <div class="row">
+            <button id="copySummaryBtn" class="small">Copy Summary</button>
+          </div>
+        </section>
+
+        <section class="field">
+          <label>Rubric text</label>
+          <textarea id="rubric" readonly></textarea>
+          <div class="row">
+            <button id="copyRubricBtn" class="small">Copy Rubric</button>
+          </div>
+        </section>
+
+        <section class="field">
+          <label>Difficulty Explanation</label>
+          <textarea id="difficultyExplanation" readonly></textarea>
+          <div class="row">
+            <button id="copyDifficultyExplanationBtn" class="small">Copy Difficulty Explanation</button>
+          </div>
+        </section>
+
+        <section class="field">
+          <label>Solution Explanation</label>
+          <textarea id="solutionExplanation" readonly></textarea>
+          <div class="row">
+            <button id="copySolutionExplanationBtn" class="small">Copy Solution Explanation</button>
+          </div>
+        </section>
+
+        <section class="field">
+          <label>Verification Explanation</label>
+          <textarea id="verificationExplanation" readonly></textarea>
+          <div class="row">
+            <button id="copyVerificationExplanationBtn" class="small">Copy Verification Explanation</button>
+          </div>
+        </section>
+
+        <section class="field highlight">
+          <label>Formatted Text</label>
+          <textarea id="formattedText" readonly placeholder="Formatted text will appear after Start succeeds."></textarea>
+          <div class="row">
+            <button id="copyFormattedBtn" class="small primary-copy" disabled>Copy Text for Reviewer</button>
+          </div>
+        </section>
+
+        <section class="field highlight">
+          <label>ChatGPT JSON Response</label>
+          <textarea id="chatgptJson" placeholder="JSON response from ChatGPT will appear here."></textarea>
+          <div class="row">
+            <button id="copyChatgptJsonBtn" class="small primary-copy">Copy JSON</button>
+          </div>
+        </section>
+      </div>
+
+      <div id="revisionTabContent" role="tabpanel" aria-labelledby="revisionTabBtn" hidden>
+        <section class="field highlight" id="revisionQueueSection">
+          <label>Revision Queue</label>
+
+          <section class="field">
+            <label>Revision ChatGPT URL</label>
+            <input id="revisionChatgptUrl" placeholder="https://chatgpt.com/s-project" />
+          </section>
+
+          <section class="field">
+            <label>Revision batch size (1-5)</label>
+            <input id="revisionBatchSize" type="number" min="1" max="5" step="1" value="5" />
+          </section>
+
+          <button id="scanRevisionListBtn" class="secondary-action">Scan Current Revision List</button>
+          <button id="startRevisionBatchBtn" class="secondary-action">Start Revision Batch From List</button>
+          <button id="addCurrentRevisionPageBtn" class="secondary-action">Add Current Revision Page</button>
+          <button id="pauseRevisionQueueBtn" class="secondary-action">Pause Revision Queue</button>
+          <button id="resumeRevisionQueueBtn" class="secondary-action">Resume Revision Queue</button>
+          <button id="clearFinishedRevisionJobsBtn" class="secondary-action">Clear Finished Revision Jobs</button>
+
+          <section class="field">
+            <label><input id="autoSendNoFixRevisions" type="checkbox" /> Auto send no-fix revisions</label>
+            <label><input id="enableGenerateRubricAfterUpload" type="checkbox" checked /> Enable generate rubric checkbox after revision upload</label>
+            <label><input id="autoCheckSendReviewerAfterFixedUpload" type="checkbox" /> Auto check Send to Reviewer after fixed revision upload</label>
+            <label><input id="forceFullResend" type="checkbox" /> Force full resend</label>
+          </section>
+
+          <section class="field">
+            <label>Queue Stats</label>
+            <div id="revisionQueueStats" class="status">No revision jobs yet.</div>
+          </section>
+
+          <section class="field">
+            <label>Jobs</label>
+            <div id="revisionJobsList" class="revision-jobs-list"></div>
+          </section>
+
+          <section class="field">
+            <label>Current Task Snapshot</label>
+
+            <section class="field">
+              <label>Zipfile name</label>
+              <input id="revisionZipName" readonly />
+            </section>
+
+            <section class="field">
+              <label>Reviewer Feedback</label>
+              <textarea id="revisionReviewerFeedback" readonly></textarea>
+            </section>
+
+            <section class="field">
+              <label>Summary text</label>
+              <textarea id="revisionSummary" readonly></textarea>
+            </section>
+
+            <section class="field">
+              <label>Rubric text</label>
+              <textarea id="revisionRubric" readonly></textarea>
+            </section>
+
+            <section class="field">
+              <label>Difficulty Explanation</label>
+              <textarea id="revisionDifficultyExplanation" readonly></textarea>
+            </section>
+
+            <section class="field">
+              <label>Solution Explanation</label>
+              <textarea id="revisionSolutionExplanation" readonly></textarea>
+            </section>
+
+            <section class="field">
+              <label>Verification Explanation</label>
+              <textarea id="revisionVerificationExplanation" readonly></textarea>
+            </section>
+          </section>
+        </section>
+      </div>
+    </main>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
