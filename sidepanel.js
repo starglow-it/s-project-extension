@@ -2741,6 +2741,72 @@ function waitForJobDownload(jobId, role, timeoutMs = 120000) {
   });
 }
 
+function getDownloadBaseName(fullPath) {
+  const raw = String(fullPath || "").trim();
+  if (!raw) return "";
+  const parts = raw.split(/[\\/]/);
+  return String(parts[parts.length - 1] || "").trim();
+}
+
+function parseDownloadStartMs(item) {
+  const value = String(item?.startTime || "").trim();
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function looksLikeZipDownloadItem(item) {
+  const filename = String(item?.filename || "").toLowerCase();
+  const finalUrl = String(item?.finalUrl || item?.url || "").toLowerCase();
+  const mime = String(item?.mime || "").toLowerCase();
+  return filename.endsWith(".zip") || filename.includes(".zip") || finalUrl.includes(".zip") || mime.includes("zip") || mime.includes("octet-stream");
+}
+
+async function findRecentCompletedZipDownloadForTab(tabId, sinceMs = 0) {
+  const downloads = await chrome.downloads.search({
+    state: "complete",
+    orderBy: ["-startTime"],
+    limit: 60
+  });
+
+  const normalizedSinceMs = Number.isFinite(sinceMs) ? sinceMs : 0;
+  const candidates = downloads.filter((item) => {
+    if (!looksLikeZipDownloadItem(item)) return false;
+    const startMs = parseDownloadStartMs(item);
+    if (normalizedSinceMs && startMs && startMs < normalizedSinceMs - 10000) return false;
+
+    const sameTab = Number(item?.tabId) === Number(tabId);
+    const unknownTab = !Number.isFinite(Number(item?.tabId)) || Number(item?.tabId) < 0;
+    return sameTab || unknownTab;
+  });
+
+  return candidates[0] || null;
+}
+
+async function waitForRecentCompletedZipDownloadForTab(tabId, sinceMs, timeoutMs = 45000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    const found = await findRecentCompletedZipDownloadForTab(tabId, sinceMs);
+    if (found) {
+      return {
+        ok: true,
+        downloadId: found.id,
+        filename: getDownloadBaseName(found.filename),
+        fullPath: found.filename || "",
+        tabId: found.tabId,
+        startTime: found.startTime || "",
+        source: "downloads-search-fallback"
+      };
+    }
+    await delay(1200);
+  }
+
+  return {
+    ok: false,
+    error: "Timed out while searching chrome.downloads fallback for revised ZIP."
+  };
+}
+
 async function persistRevisionState() {
   logRevision("persist-state", {
     jobCount: revisionJobs.length,
@@ -4650,7 +4716,31 @@ async function handleCompletedChatGptRevision(job) {
 
     logRevision("revised-zip-clicked", job, clickResult);
 
-    const revisedDownload = await waitDownload;
+    let revisedDownload = null;
+    try {
+      revisedDownload = await waitDownload;
+    } catch (waitErr) {
+      logRevision("revised-zip-wait-timeout", job, { error: waitErr?.message || String(waitErr) });
+
+      const fallbackDownload = await waitForRecentCompletedZipDownloadForTab(
+        job.chatGptTabId,
+        clickStart,
+        60000
+      );
+
+      if (!fallbackDownload?.ok || !fallbackDownload?.filename) {
+        throw waitErr;
+      }
+
+      revisedDownload = fallbackDownload;
+      logRevision("revised-zip-fallback-resolved", job, {
+        filename: fallbackDownload.filename,
+        source: fallbackDownload.source,
+        downloadId: fallbackDownload.downloadId,
+        tabId: fallbackDownload.tabId
+      });
+    }
+
     job.revisedZipDownloadedName = revisedDownload.filename || filenameHint;
     job.revisedZipFileApiUrl = buildFileApiUrl(job.revisedZipDownloadedName);
     logRevision("revised-zip-downloaded", job, { filename: job.revisedZipDownloadedName, fileApiUrl: job.revisedZipFileApiUrl });
