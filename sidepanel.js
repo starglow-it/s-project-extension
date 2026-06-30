@@ -2836,28 +2836,173 @@ function pageExtractRevisionData() {
     return "";
   }
 
-  function getFieldText(testId, fallbackId = "") {
-    const field = getField(testId);
-    const fromMonaco = getMonacoText(field);
-    if (fromMonaco) return fromMonaco;
+  function getTextNodes(root) {
+    if (!root) return "";
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const parts = [];
+    let node;
 
-    if (field) {
-      const area = field.querySelector("textarea, input");
-      const direct = normalize(area?.value || "");
-      if (direct) return direct;
-
-      const editable = field.querySelector("[contenteditable='true']");
-      const editText = normalize(editable?.innerText || editable?.textContent || "");
-      if (editText) return editText;
+    while ((node = walker.nextNode())) {
+      const text = normalize(node.nodeValue);
+      if (text) parts.push(text);
     }
 
-    if (fallbackId) {
-      const el = document.getElementById(fallbackId);
-      const direct = normalize(el?.value || el?.innerText || el?.textContent || "");
-      if (direct) return direct;
+    return normalize(parts.join("\n"));
+  }
+
+  function numericTop(el, fallback) {
+    const ownTop = parseFloat(el.style?.top || "");
+    if (Number.isFinite(ownTop)) return ownTop;
+
+    const transform = String(el.style?.transform || "");
+    const match = transform.match(/translate3d?\([^,]+,\s*(-?\d+(?:\.\d+)?)px/i);
+    return match ? Number(match[1]) : fallback;
+  }
+
+  function getViewLinesText(scope) {
+    if (!scope) return { text: "", lineCount: 0, height: 0 };
+
+    const candidates = Array.from(scope.querySelectorAll(".view-lines.monaco-mouse-cursor-text, .view-lines"))
+      .map((container) => {
+        const lines = Array.from(container.querySelectorAll(".view-line"))
+          .map((line, index) => ({
+            top: numericTop(line, index),
+            text: normalize(line.innerText || line.textContent || "")
+          }))
+          .filter((line) => line.text)
+          .sort((a, b) => a.top - b.top);
+
+        const text = normalize(lines.map((line) => line.text).join("\n"));
+        const height = parseFloat(container.style?.height || "0") || 0;
+
+        return {
+          text,
+          lineCount: lines.length,
+          height,
+          score: text.length + height + lines.length * 50
+        };
+      })
+      .filter((candidate) => candidate.text);
+
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0] || { text: "", lineCount: 0, height: 0 };
+  }
+
+  function findRubricField() {
+    return (
+      getField("field-test_rubrics") ||
+      Array.from(document.querySelectorAll('[data-testid^="field-"]')).find((field) =>
+        /Agent-generated rubric\(s\)|#\s*Rubric|rubric/i.test(getTextNodes(field))
+      ) ||
+      null
+    );
+  }
+
+  async function getExpandedEditorText(field, targetHeight) {
+    if (!field) return "";
+
+    const modelText = getMonacoText(field);
+    const editor = field.querySelector(".monaco-editor") || field.querySelector('[role="code"]');
+    if (!editor) return modelText || getViewLinesText(field).text || getTextNodes(field);
+
+    const elementsToResize = [
+      editor.closest("section")?.parentElement,
+      editor.closest("section"),
+      editor.parentElement,
+      editor,
+      editor.querySelector(".overflow-guard"),
+      editor.querySelector(".editor-scrollable"),
+      editor.querySelector(".lines-content"),
+      editor.querySelector(".view-overlays"),
+      editor.querySelector(".view-lines.monaco-mouse-cursor-text, .view-lines")
+    ];
+
+    const previous = [];
+    for (const el of elementsToResize) {
+      if (!el) continue;
+      previous.push([el, el.style.height, el.style.maxHeight, el.style.minHeight, el.style.overflow]);
+      el.style.height = `${targetHeight}px`;
+      el.style.maxHeight = "none";
+      el.style.minHeight = `${targetHeight}px`;
+      el.style.overflow = "visible";
     }
 
-    return normalize(getPlainText(field));
+    try {
+      editor.scrollIntoView({ block: "center", inline: "nearest" });
+      window.dispatchEvent(new Event("resize"));
+      await sleep(800);
+      return modelText || getMonacoText(field) || getViewLinesText(field).text || getTextNodes(field);
+    } finally {
+      for (let i = previous.length - 1; i >= 0; i -= 1) {
+        const [el, h, mh, minh, ov] = previous[i];
+        if (!el) continue;
+        el.style.height = h || "";
+        el.style.maxHeight = mh || "";
+        el.style.minHeight = minh || "";
+        el.style.overflow = ov || "";
+      }
+      window.dispatchEvent(new Event("resize"));
+      await sleep(120);
+    }
+  }
+
+  async function getSummaryText() {
+    return getExpandedEditorText(getField("field-text_summary"), 4000) || getExpandedEditorText(getField("field-quality_check_summary"), 4000);
+  }
+
+  async function getRubricText() {
+    return getExpandedEditorText(findRubricField(), 5000);
+  }
+
+  function getSimpleTextareaText(id, fieldTestId = "") {
+    const textarea = document.getElementById(id);
+    if (textarea?.value) return normalize(textarea.value);
+
+    if (fieldTestId) {
+      const field = getField(fieldTestId);
+      const editable = field?.querySelector("textarea, input, [contenteditable='true']");
+      const value = normalize(editable?.value || editable?.innerText || editable?.textContent || "");
+      if (value) return value;
+    }
+
+    return "";
+  }
+
+  async function getReviewerFeedbackText() {
+    function cleanReviewerFeedback(text) {
+      return normalize(text)
+        .replace(/^Reviewer Feedback\s*/i, "")
+        .replace(/Do you disagree with the reviewer feedback\?/gi, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+    }
+
+    const direct = getSimpleTextareaText("test_review", "field-test_review");
+    if (direct) return cleanReviewerFeedback(direct);
+
+    const button = Array.from(document.querySelectorAll("button")).find((btn) => {
+      const text = normalize(btn.textContent || "");
+      return /^Reviewer Feedback$/i.test(text) || /reviewer feedback/i.test(text);
+    });
+
+    if (!button) return "";
+
+    if (button.getAttribute("aria-expanded") !== "true") {
+      try {
+        button.click();
+        await sleep(250);
+      } catch {}
+    }
+
+    const controlsId = button.getAttribute("aria-controls");
+    if (controlsId) {
+      const panelText = cleanReviewerFeedback(getTextNodes(document.getElementById(controlsId)));
+      if (panelText) return panelText;
+    }
+
+    const card = button.closest(".w-full.max-w-full.rounded-md.border") || button.closest(".rounded-md.border") || button.parentElement;
+    const panel = button.nextElementSibling || card?.querySelector(".px-16.pb-4") || card?.querySelector("[id^='radix-']");
+    return cleanReviewerFeedback(getTextNodes(panel));
   }
 
   function findFileName(field) {
@@ -2883,12 +3028,12 @@ function pageExtractRevisionData() {
     const pageText = normalize(document.body?.innerText || "");
     const uidMatch = pageText.match(/(?:UID|uuid)\s*:?\s*([a-f0-9-]{8,})/i);
 
-    const summaryText = getFieldText("field-quality_check_summary") || getFieldText("field-text_summary");
-    const reviewerFeedbackText = getFieldText("field-test_review");
-    const rubricText = getFieldText("field-test_rubrics");
-    const difficultyExplanation = getFieldText("field-difficulty_explanation", "difficulty_explanation");
-    const solutionExplanation = getFieldText("field-solution_explanation", "solution_explanation");
-    const verificationExplanation = getFieldText("field-verification_explanation", "verification_explanation");
+    const summaryText = await getSummaryText();
+    const reviewerFeedbackText = await getReviewerFeedbackText();
+    const rubricText = await getRubricText();
+    const difficultyExplanation = getSimpleTextareaText("difficulty_explanation", "field-difficulty_explanation");
+    const solutionExplanation = getSimpleTextareaText("solution_explanation", "field-solution_explanation");
+    const verificationExplanation = getSimpleTextareaText("verification_explanation", "field-verification_explanation");
     const sourceZipField = getField("field-upload_a_zip_file");
     const buildingErrorField = getField("field-difficulty_check_artifact_s3_key");
     const sourceZipFileName = findFileName(sourceZipField);
@@ -4091,11 +4236,18 @@ async function handleCompletedChatGptRevision(job) {
 
     const waitDownload = waitForJobDownload(job.id, "revised_zip", 180000);
 
-    const [{ result: clickResult }] = await chrome.scripting.executeScript({
-      target: { tabId: job.chatGptTabId },
-      world: "MAIN",
-      func: pageFindAndClickLatestChatGptZipDownload
-    });
+    let clickResult = null;
+    const clickStart = Date.now();
+    while (Date.now() - clickStart <= 120000) {
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId: job.chatGptTabId },
+        world: "MAIN",
+        func: pageFindAndClickLatestChatGptZipDownload
+      });
+      clickResult = result;
+      if (clickResult?.ok && clickResult?.clicked) break;
+      await delay(1500);
+    }
 
     if (!clickResult?.ok || !clickResult?.clicked) {
       throw new Error(clickResult?.error || "Could not click revised ZIP download.");
