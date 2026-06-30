@@ -2540,6 +2540,7 @@ let revisionPollTimer = null;
 let revisionStarterBusy = false;
 let lastPausedPollLogAt = 0;
 let revisionBatchScopeUrls = null;
+let revisionBatchActive = false;
 
 function nowIso() {
   return new Date().toISOString();
@@ -4190,10 +4191,15 @@ async function startRevisionJobFromListItem(listItem) {
   }
 }
 
-async function processNextRevisionFromList() {
-  logRevision("process-next-start", { busy: revisionStarterBusy, paused: Boolean(revisionSettings.paused) });
+async function processNextRevisionFromList(options = {}) {
+  const force = Boolean(options?.force);
+  logRevision("process-next-start", { busy: revisionStarterBusy, paused: Boolean(revisionSettings.paused), batchActive: revisionBatchActive, force });
   if (revisionStarterBusy) {
     logRevision("process-next-skip-busy");
+    return;
+  }
+  if (!revisionBatchActive && !force) {
+    logRevision("process-next-skip-inactive-batch");
     return;
   }
   if (revisionSettings.paused) {
@@ -4241,8 +4247,10 @@ async function processNextRevisionFromList() {
       blockedErrorListUuidCount: blockedErrorListUuids.size,
       scopedBatchCount: revisionBatchScopeUrls ? revisionBatchScopeUrls.size : 0
     });
-    const selectedCandidates = candidates.slice(0, Math.min(slots, candidates.length));
-    await Promise.all(selectedCandidates.map((item) => startRevisionJobFromListItem(item)));
+    const nextCandidate = candidates[0] || null;
+    if (nextCandidate && slots > 0) {
+      await startRevisionJobFromListItem(nextCandidate);
+    }
   } finally {
     revisionStarterBusy = false;
     logRevision("process-next-finished");
@@ -4273,6 +4281,7 @@ async function startRevisionBatchFromList() {
     .filter((it) => it.url && !completedOrErroredUrls.has(it.url));
 
   revisionBatchScopeUrls = new Set(selected.slice(0, target).map((it) => it.url));
+  revisionBatchActive = true;
   logRevision("start-batch-scope", {
     target,
     selectedCount: revisionBatchScopeUrls.size,
@@ -4532,7 +4541,7 @@ async function handleRevisionJobAction(action, jobId) {
       setRevisionStatus(job, "queued");
       job.error = null;
       await refreshRevisionUiAndPersist();
-      await processNextRevisionFromList();
+      await processNextRevisionFromList({ force: true });
       return;
     }
 
@@ -4723,7 +4732,7 @@ if (resumeRevisionQueueBtn) {
     revisionSettings.paused = false;
     await refreshRevisionUiAndPersist();
     setStatus("Status: Revision queue resumed", "ok");
-    await processNextRevisionFromList();
+    await processNextRevisionFromList({ force: true });
   });
 }
 
@@ -4731,6 +4740,7 @@ if (clearFinishedRevisionJobsBtn) {
   clearFinishedRevisionJobsBtn.addEventListener("click", async () => {
     revisionJobs = [];
     revisionBatchScopeUrls = null;
+    revisionBatchActive = false;
     await refreshRevisionUiAndPersist();
     setStatus("Status: Cleared jobs list", "ok");
   });
