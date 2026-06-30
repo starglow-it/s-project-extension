@@ -115,7 +115,7 @@ function looksLikeExpectedDownload(downloadItem, payload) {
   }
 
   if (role === "building_error") {
-    return /\.(txt|log|json|csv)$/i.test(currentName) || /\.(txt|log|json|csv)$/i.test(expectedName) || mime.includes("text") || mime.includes("json") || mime.includes("octet-stream");
+    return /\.(zip|txt|log|json|csv)$/i.test(currentName) || /\.(zip|txt|log|json|csv)$/i.test(expectedName) || mime.includes("zip") || mime.includes("text") || mime.includes("json") || mime.includes("octet-stream");
   }
 
   return Boolean(payload?.filename);
