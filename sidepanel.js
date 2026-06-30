@@ -3658,14 +3658,34 @@ function buildFollowUpRevisionPrompt(job) {
 
 async function getFileDefFromApi(fileName, defaultType) {
   const url = buildFileApiUrl(fileName);
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) throw new Error(`Failed to fetch ${fileName} from file API (HTTP ${response.status}).`);
+  let response = null;
+
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    response = await fetch(url, { cache: "no-store" });
+    if (response.ok) break;
+    await delay(500 * attempt);
+  }
+
+  if (!response?.ok) throw new Error(`Failed to fetch ${fileName} from file API (HTTP ${response?.status || "unknown"}).`);
   const buffer = await response.arrayBuffer();
   return {
     name: fileName,
     type: defaultType,
     bytes: Array.from(new Uint8Array(buffer))
   };
+}
+
+async function getOptionalFileDefFromApi(job, fileName, defaultType, role) {
+  try {
+    return await getFileDefFromApi(fileName, defaultType);
+  } catch (err) {
+    logRevision("optional-attachment-skip", job, {
+      role,
+      fileName,
+      error: err?.message || String(err)
+    });
+    return null;
+  }
 }
 
 function getMissingRevisionDataFields(extracted, job = null) {
@@ -3853,8 +3873,7 @@ async function startRevisionJobFromListItem(listItem) {
     }
 
     if (job.buildingErrorDownloadAvailable || job.buildingErrorOriginalName) {
-      const ext = /\.[a-z0-9]+$/i.test(job.buildingErrorOriginalName) ? job.buildingErrorOriginalName.match(/\.[a-z0-9]+$/i)[0] : ".txt";
-      const buildName = job.buildingErrorOriginalName || `${job.taskUuid || "task"}_difficulty_check_results_${Date.now()}${ext}`;
+      const buildName = job.buildingErrorOriginalName || `${job.taskUuid || "task"}_difficulty_check_artifact_${Date.now()}.zip`;
       const buildDownload = await registerAndWaitDownload(job, job.snorkelTabId, "building_error", buildName, pageDownloadRevisionBuildingError);
       job.buildingErrorDownloadedName = buildDownload.filename || buildName;
       job.buildingErrorFileApiUrl = buildFileApiUrl(job.buildingErrorDownloadedName);
@@ -3888,7 +3907,8 @@ async function startRevisionJobFromListItem(listItem) {
       attachments.push(await getFileDefFromApi(job.sourceZipDownloadedName, "application/zip"));
     }
     if (job.buildingErrorDownloadedName) {
-      attachments.push(await getFileDefFromApi(job.buildingErrorDownloadedName, "text/plain"));
+      const buildingErrorAttachment = await getOptionalFileDefFromApi(job, job.buildingErrorDownloadedName, "application/zip", "building_error");
+      if (buildingErrorAttachment) attachments.push(buildingErrorAttachment);
     }
 
     logRevision("chatgpt-attachments-prepared", job, {
