@@ -3629,7 +3629,12 @@ function pageFillRevisionFormFromJob(payload) {
 
   return (async () => {
     const normalized = payload?.normalizedFillData || {};
+    const fallback = payload?.fallbackData || {};
     const opts = payload?.options || {};
+
+    const resolvedDifficulty = normalized.difficultyExplanation || fallback.difficultyExplanation || "";
+    const resolvedSolution = normalized.solutionExplanation || fallback.solutionExplanation || "";
+    const resolvedVerification = normalized.verificationExplanation || fallback.verificationExplanation || "";
 
     fillField("field-quality_check_summary", normalized.summaryText);
     await sleep(90);
@@ -3637,11 +3642,11 @@ function pageFillRevisionFormFromJob(payload) {
     await sleep(90);
     fillField("field-test_review", normalized.reviewerFeedbackRewrite || normalized.revisionNotes || normalized.acceptanceNotes);
     await sleep(90);
-    fillField("field-difficulty_explanation", normalized.difficultyExplanation, "difficulty_explanation");
+    fillField("field-difficulty_explanation", resolvedDifficulty, "difficulty_explanation");
     await sleep(90);
-    fillField("field-solution_explanation", normalized.solutionExplanation, "solution_explanation");
+    fillField("field-solution_explanation", resolvedSolution, "solution_explanation");
     await sleep(90);
-    fillField("field-verification_explanation", normalized.verificationExplanation, "verification_explanation");
+    fillField("field-verification_explanation", resolvedVerification, "verification_explanation");
     await sleep(90);
 
     setCheckbox("field-checkbox_evaluate_rubrics", Boolean(opts.enableGenerateRubricAfterUpload));
@@ -3655,12 +3660,21 @@ function pageFillRevisionFormFromJob(payload) {
     });
 
     const waitStart = Date.now();
-    while (checkButton && !isButtonEnabled(checkButton) && Date.now() - waitStart <= 20000) {
-      await sleep(500);
+    while (Date.now() - waitStart <= 30000) {
       checkButton = findCheckFeedbackButton();
+      if (checkButton && isButtonEnabled(checkButton)) break;
+
+      // Keep explanations populated while the button is disabled and backend validation is pending.
+      fillField("field-difficulty_explanation", resolvedDifficulty, "difficulty_explanation");
+      fillField("field-solution_explanation", resolvedSolution, "solution_explanation");
+      fillField("field-verification_explanation", resolvedVerification, "verification_explanation");
+      await sleep(500);
     }
 
     if (checkButton && isButtonEnabled(checkButton)) {
+      try {
+        checkButton.scrollIntoView({ block: "center", inline: "nearest" });
+      } catch {}
       checkButton.click();
       console.log("[s-project-extension][revision-page] check-feedback-clicked", {
         at: new Date().toISOString(),
@@ -4313,6 +4327,10 @@ async function handleCompletedChatGptRevision(job) {
 
     const waitDownload = waitForJobDownload(job.id, "revised_zip", 180000);
 
+    await chrome.tabs.update(job.chatGptTabId, { active: true });
+    if (job.chatGptWindowId) await chrome.windows.update(job.chatGptWindowId, { focused: true });
+    await waitForTabComplete(job.chatGptTabId, 30000);
+
     let clickResult = null;
     const clickStart = Date.now();
     while (Date.now() - clickStart <= 120000) {
@@ -4364,12 +4382,16 @@ async function handleCompletedChatGptRevision(job) {
     setRevisionStatus(job, "filling_revision");
     await refreshRevisionUiAndPersist();
 
+    // Snorkel usually enables "Check feedback" a few seconds after upload processing completes.
+    await delay(6000);
+
     await chrome.scripting.executeScript({
       target: { tabId: job.snorkelTabId },
       world: "MAIN",
       func: pageFillRevisionFormFromJob,
       args: [{
         normalizedFillData: job.normalizedFillData || {},
+        fallbackData: job.extractedData || {},
         options: {
           enableGenerateRubricAfterUpload: Boolean(revisionSettings.enableGenerateRubricAfterUpload),
           autoCheckSendReviewerAfterFixedUpload: Boolean(revisionSettings.autoCheckSendReviewerAfterFixedUpload)
