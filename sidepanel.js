@@ -2526,6 +2526,7 @@ const pendingDownloadWaiters = new Map();
 let revisionPollTimer = null;
 let revisionStarterBusy = false;
 let lastPausedPollLogAt = 0;
+let revisionBatchScopeUrls = null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -2545,6 +2546,16 @@ function setRevisionStatus(job, status, error = null) {
 
 function isRevisionJobRunning(job) {
   return REVISION_RUNNING_STATUSES.has(String(job?.status || ""));
+}
+
+function hasReusableChatSessionUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return false;
+  return /\/c\//i.test(raw);
+}
+
+function normalizeRevisionIdentity(value) {
+  return String(value || "").trim().toLowerCase();
 }
 
 function resetRevisionJobForStart(job) {
@@ -3887,9 +3898,11 @@ async function startRevisionJobFromListItem(listItem) {
 
     const existingSession = revisionSessionRegistry[job.taskUuid] || null;
     const savedSessionUrl = existingSession?.chatGptSessionUrl || "";
-    const sessionUrl = savedSessionUrl || getRevisionChatGptUrl();
+    const canReuseSavedSession = hasReusableChatSessionUrl(savedSessionUrl);
+    const sessionUrl = canReuseSavedSession ? savedSessionUrl : getRevisionChatGptUrl();
     logRevision("chatgpt-session-selected", job, {
       hasSavedSession: Boolean(savedSessionUrl),
+      canReuseSavedSession,
       sessionUrl,
       forceFullResend: Boolean(job.forceFullResend)
     });
@@ -3901,7 +3914,7 @@ async function startRevisionJobFromListItem(listItem) {
     logRevision("chatgpt-tab-loaded", job);
 
     const attachments = [];
-    const shouldFullResend = !savedSessionUrl || Boolean(job.forceFullResend);
+    const shouldFullResend = !canReuseSavedSession || Boolean(job.forceFullResend);
 
     if (shouldFullResend && job.sourceZipDownloadedName) {
       attachments.push(await getFileDefFromApi(job.sourceZipDownloadedName, "application/zip"));
@@ -3989,17 +4002,34 @@ async function processNextRevisionFromList() {
     logRevision("process-next-counts", { activeCount, target, listCount: revisionListState.items.length, statusCounts });
     if (activeCount >= target) return;
 
-    const activeUrls = new Set(revisionJobs.filter((j) => isRevisionJobRunning(j)).map((j) => j.snorkelRevisionUrl));
-    const completedUrls = new Set(revisionJobs.filter((j) => j.status === "done" || j.status === "ready_to_send_reviewer").map((j) => j.snorkelRevisionUrl));
-    const blockedErrorUrls = new Set(revisionJobs.filter((j) => j.status === "error").map((j) => j.snorkelRevisionUrl));
+    const activeUrls = new Set(revisionJobs.filter((j) => isRevisionJobRunning(j)).map((j) => normalizeRevisionIdentity(j.snorkelRevisionUrl)));
+    const completedUrls = new Set(revisionJobs.filter((j) => j.status === "done" || j.status === "ready_to_send_reviewer").map((j) => normalizeRevisionIdentity(j.snorkelRevisionUrl)));
+    const blockedErrorUrls = new Set(revisionJobs.filter((j) => j.status === "error").map((j) => normalizeRevisionIdentity(j.snorkelRevisionUrl)));
+    const activeListUuids = new Set(revisionJobs.filter((j) => isRevisionJobRunning(j)).map((j) => normalizeRevisionIdentity(j.listUuid)));
+    const completedListUuids = new Set(revisionJobs.filter((j) => j.status === "done" || j.status === "ready_to_send_reviewer").map((j) => normalizeRevisionIdentity(j.listUuid)));
+    const blockedErrorListUuids = new Set(revisionJobs.filter((j) => j.status === "error").map((j) => normalizeRevisionIdentity(j.listUuid)));
 
     const candidates = revisionListState.items.filter((item) => {
-      const url = String(item.absoluteUrl || "");
-      return url && !activeUrls.has(url) && !completedUrls.has(url) && !blockedErrorUrls.has(url);
+      const url = normalizeRevisionIdentity(item.absoluteUrl || "");
+      const listUuid = normalizeRevisionIdentity(item.listUuid || "");
+      if (!url) return false;
+      if (revisionBatchScopeUrls && !revisionBatchScopeUrls.has(url)) return false;
+      return !activeUrls.has(url)
+        && !completedUrls.has(url)
+        && !blockedErrorUrls.has(url)
+        && !activeListUuids.has(listUuid)
+        && !completedListUuids.has(listUuid)
+        && !blockedErrorListUuids.has(listUuid);
     });
 
     const slots = Math.max(0, target - activeCount);
-    logRevision("process-next-candidates", { candidateCount: candidates.length, slots, blockedErrorCount: blockedErrorUrls.size });
+    logRevision("process-next-candidates", {
+      candidateCount: candidates.length,
+      slots,
+      blockedErrorCount: blockedErrorUrls.size,
+      blockedErrorListUuidCount: blockedErrorListUuids.size,
+      scopedBatchCount: revisionBatchScopeUrls ? revisionBatchScopeUrls.size : 0
+    });
     for (let i = 0; i < Math.min(slots, candidates.length); i += 1) {
       await startRevisionJobFromListItem(candidates[i]);
     }
@@ -4019,6 +4049,26 @@ async function startRevisionBatchFromList() {
   if (!revisionListState.items.length) {
     await scanRevisionListFromCurrentTab();
   }
+
+  const target = Number(revisionSettings.revisionBatchSize || DEFAULT_REVISION_BATCH_SIZE);
+  const completedOrErroredUrls = new Set(
+    revisionJobs
+      .filter((j) => REVISION_TERMINAL_STATUSES.has(j.status))
+      .map((j) => normalizeRevisionIdentity(j.snorkelRevisionUrl))
+  );
+  const selected = revisionListState.items
+    .map((item) => ({
+      url: normalizeRevisionIdentity(item.absoluteUrl || "")
+    }))
+    .filter((it) => it.url && !completedOrErroredUrls.has(it.url));
+
+  revisionBatchScopeUrls = new Set(selected.slice(0, target).map((it) => it.url));
+  logRevision("start-batch-scope", {
+    target,
+    selectedCount: revisionBatchScopeUrls.size,
+    selectedUrls: Array.from(revisionBatchScopeUrls)
+  });
+
   await processNextRevisionFromList();
 }
 
