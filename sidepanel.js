@@ -39,6 +39,7 @@ const startRevisionBatchBtn = document.getElementById("startRevisionBatchBtn");
 const addCurrentRevisionPageBtn = document.getElementById("addCurrentRevisionPageBtn");
 const pauseRevisionQueueBtn = document.getElementById("pauseRevisionQueueBtn");
 const resumeRevisionQueueBtn = document.getElementById("resumeRevisionQueueBtn");
+const manualCheckFeedbackBtn = document.getElementById("manualCheckFeedbackBtn");
 const clearFinishedRevisionJobsBtn = document.getElementById("clearFinishedRevisionJobsBtn");
 const autoSendNoFixRevisionsInput = document.getElementById("autoSendNoFixRevisions");
 const enableGenerateRubricAfterUploadInput = document.getElementById("enableGenerateRubricAfterUpload");
@@ -61,6 +62,10 @@ const copyChatgptJsonBtn = document.getElementById("copyChatgptJsonBtn");
 let currentZipFileName = "";
 let currentDifficulty = "";
 let currentExtractedData = null;
+let snorkelExtractionCache = {
+  byTabId: {},
+  byUrl: {}
+};
 
 const DEFAULT_CHATGPT_URL = "https://chatgpt.com/";
 const DEFAULT_REVISION_CHATGPT_URL = "https://chatgpt.com/s-project";
@@ -226,6 +231,128 @@ function normalizeReviewAhtRange(minValue, maxValue) {
   }
 
   return { min: max, max: min };
+}
+
+function inferDifficultyFromSummaryText(summaryText) {
+  const match = String(summaryText || "").match(/Difficulty:\s*(?:✅\s*)?(EASY|MEDIUM|HARD|TRIVIAL)\b/i);
+  return match ? String(match[1] || "").toUpperCase() : "";
+}
+
+function normalizePageUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return raw;
+  }
+}
+
+function toCachedPanelData(extracted, pageUrl = "") {
+  const source = extracted && typeof extracted === "object" ? extracted : {};
+  const zipFileName = String(
+    source.zipFileName ||
+    source.sourceZipFileName ||
+    ""
+  ).trim();
+  const difficulty = String(source.difficulty || inferDifficultyFromSummaryText(source.summaryText || "")).trim().toUpperCase();
+
+  return {
+    zipFileName,
+    difficulty,
+    reviewerFeedbackText: String(source.reviewerFeedbackText || source.testReviewText || ""),
+    summaryText: String(source.summaryText || ""),
+    rubricText: String(source.rubricText || ""),
+    difficultyExplanation: String(source.difficultyExplanation || ""),
+    solutionExplanation: String(source.solutionExplanation || ""),
+    verificationExplanation: String(source.verificationExplanation || ""),
+    currentPageUrl: normalizePageUrl(pageUrl || source.currentPageUrl || ""),
+    extractedAt: source.extractedAt || nowIso()
+  };
+}
+
+function pruneExtractionCacheIfNeeded() {
+  const byTabIdEntries = Object.entries(snorkelExtractionCache.byTabId || {});
+  if (byTabIdEntries.length <= 120) return;
+
+  byTabIdEntries
+    .sort((a, b) => String(a[1]?.updatedAt || "").localeCompare(String(b[1]?.updatedAt || "")))
+    .slice(0, byTabIdEntries.length - 120)
+    .forEach(([key]) => {
+      delete snorkelExtractionCache.byTabId[key];
+    });
+}
+
+async function persistSnorkelExtractionCache() {
+  await chrome.storage.local.set({ snorkelExtractionCache });
+}
+
+async function cacheSnorkelExtractionForTab(tabId, pageUrl, extractedData, source = "") {
+  const normalizedUrl = normalizePageUrl(pageUrl);
+  const panelData = toCachedPanelData(extractedData, normalizedUrl);
+  const entry = {
+    tabId: Number.isFinite(Number(tabId)) ? Number(tabId) : null,
+    url: normalizedUrl,
+    panelData,
+    source,
+    updatedAt: nowIso()
+  };
+
+  if (entry.tabId) {
+    snorkelExtractionCache.byTabId[String(entry.tabId)] = entry;
+  }
+  if (normalizedUrl) {
+    snorkelExtractionCache.byUrl[normalizedUrl] = entry;
+  }
+
+  pruneExtractionCacheIfNeeded();
+  await persistSnorkelExtractionCache();
+  logRevision("snorkel-cache-saved", {
+    tabId: entry.tabId,
+    url: entry.url,
+    source,
+    zipFileName: panelData.zipFileName || "",
+    extractedAt: panelData.extractedAt || ""
+  });
+}
+
+function getCachedSnorkelExtraction(tabId, pageUrl) {
+  const tabKey = Number.isFinite(Number(tabId)) ? String(Number(tabId)) : "";
+  if (tabKey && snorkelExtractionCache.byTabId?.[tabKey]) {
+    return snorkelExtractionCache.byTabId[tabKey];
+  }
+
+  const normalizedUrl = normalizePageUrl(pageUrl);
+  if (normalizedUrl && snorkelExtractionCache.byUrl?.[normalizedUrl]) {
+    return snorkelExtractionCache.byUrl[normalizedUrl];
+  }
+
+  return null;
+}
+
+function applyCachedSnorkelExtractionToPanel(entry) {
+  if (!entry?.panelData) return false;
+  applyPanelData(entry.panelData);
+  logRevision("snorkel-cache-applied", {
+    tabId: entry.tabId || null,
+    url: entry.url || "",
+    source: entry.source || "",
+    updatedAt: entry.updatedAt || ""
+  });
+  return true;
+}
+
+async function restoreCachedSnorkelExtractionForActiveTab() {
+  try {
+    const tab = await getActiveTab();
+    const cached = getCachedSnorkelExtraction(tab.id, tab.url || "");
+    if (!cached) return false;
+    return applyCachedSnorkelExtractionToPanel(cached);
+  } catch {
+    return false;
+  }
 }
 
 function getReviewAhtRange() {
@@ -2313,6 +2440,7 @@ async function getData() {
     }
 
     await chrome.storage.local.set({ lastResult: result });
+    await cacheSnorkelExtractionForTab(tab.id, tab.url || "", result, "get-data");
     setStatus("Status: Completed", "ok");
   } catch (err) {
     updateFormattedCopyState();
@@ -2414,6 +2542,7 @@ async function autoRunWorkflow() {
   try {
     const snorkelTab = await getActiveTab();
     const result = await extractDataFromTabId(snorkelTab.id);
+    await cacheSnorkelExtractionForTab(snorkelTab.id, snorkelTab.url || "", result, "auto-run-extract");
 
     currentZipFileName = result.zipFileName || "";
     currentDifficulty = result.difficulty || "";
@@ -3617,14 +3746,36 @@ function pageFillRevisionFormFromJob(payload) {
   function findCheckFeedbackButton() {
     return Array.from(document.querySelectorAll("button")).find((btn) => {
       const text = normalize(btn.innerText || btn.textContent || "").toLowerCase();
-      return text === "check feedback" || text.includes("check feedback");
+      const aria = normalize(btn.getAttribute("aria-label") || "").toLowerCase();
+      const title = normalize(btn.getAttribute("title") || "").toLowerCase();
+      return text.includes("check feedback") || aria.includes("check feedback") || title.includes("check feedback");
     }) || null;
   }
 
   function isButtonEnabled(button) {
     if (!button) return false;
     const ariaDisabled = String(button.getAttribute("aria-disabled") || "").toLowerCase();
-    return !button.disabled && ariaDisabled !== "true";
+    const style = window.getComputedStyle(button);
+    const hidden = style.display === "none" || style.visibility === "hidden";
+    return !button.disabled && ariaDisabled !== "true" && !hidden;
+  }
+
+  function clickButtonRobust(button) {
+    if (!button) return false;
+    try {
+      button.scrollIntoView({ block: "center", inline: "nearest" });
+    } catch {}
+
+    try {
+      button.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, view: window }));
+      button.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+      button.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      button.click();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   return (async () => {
@@ -3660,7 +3811,8 @@ function pageFillRevisionFormFromJob(payload) {
     });
 
     const waitStart = Date.now();
-    while (Date.now() - waitStart <= 30000) {
+    const maxWaitMs = Math.max(10000, Number(opts.checkFeedbackWaitMs) || 45000);
+    while (Date.now() - waitStart <= maxWaitMs) {
       checkButton = findCheckFeedbackButton();
       if (checkButton && isButtonEnabled(checkButton)) break;
 
@@ -3671,28 +3823,163 @@ function pageFillRevisionFormFromJob(payload) {
       await sleep(500);
     }
 
+    let clicked = false;
+    let clickAttempts = 0;
     if (checkButton && isButtonEnabled(checkButton)) {
-      try {
-        checkButton.scrollIntoView({ block: "center", inline: "nearest" });
-      } catch {}
-      checkButton.click();
+      for (let attempt = 1; attempt <= 6; attempt += 1) {
+        clickAttempts = attempt;
+        checkButton = findCheckFeedbackButton();
+        if (!checkButton || !isButtonEnabled(checkButton)) break;
+        clicked = clickButtonRobust(checkButton) || clicked;
+        await sleep(700);
+        const after = findCheckFeedbackButton();
+        if (!after || !isButtonEnabled(after)) {
+          clicked = true;
+          break;
+        }
+      }
+    }
+
+    if (clicked) {
       console.log("[s-project-extension][revision-page] check-feedback-clicked", {
         at: new Date().toISOString(),
-        waitedMs: Date.now() - waitStart
+        waitedMs: Date.now() - waitStart,
+        clickAttempts
       });
       await sleep(300);
     } else {
       console.log("[s-project-extension][revision-page] check-feedback-not-clicked", {
         at: new Date().toISOString(),
         found: Boolean(checkButton),
-        enabled: isButtonEnabled(checkButton)
+        enabled: isButtonEnabled(checkButton),
+        waitedMs: Date.now() - waitStart,
+        clickAttempts
       });
     }
 
     console.log("[s-project-extension][revision-page] fill-revision-form-complete", { at: new Date().toISOString() });
 
-    return { ok: true, checkFeedbackClicked: Boolean(checkButton && isButtonEnabled(checkButton)) };
+    return {
+      ok: true,
+      checkFeedbackClicked: clicked,
+      checkFeedbackFound: Boolean(checkButton),
+      checkFeedbackEnabled: isButtonEnabled(checkButton),
+      waitedMs: Date.now() - waitStart,
+      clickAttempts
+    };
   })();
+}
+
+function pageClickCheckFeedbackButton(payload = {}) {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function normalize(text) {
+    return String(text || "").trim().toLowerCase();
+  }
+
+  function findButton() {
+    return Array.from(document.querySelectorAll("button")).find((btn) => {
+      const text = normalize(btn.innerText || btn.textContent || "");
+      const aria = normalize(btn.getAttribute("aria-label") || "");
+      const title = normalize(btn.getAttribute("title") || "");
+      return text.includes("check feedback") || aria.includes("check feedback") || title.includes("check feedback");
+    }) || null;
+  }
+
+  function isEnabled(button) {
+    if (!button) return false;
+    const ariaDisabled = normalize(button.getAttribute("aria-disabled") || "");
+    const style = window.getComputedStyle(button);
+    const hidden = style.display === "none" || style.visibility === "hidden";
+    return !button.disabled && ariaDisabled !== "true" && !hidden;
+  }
+
+  function clickRobust(button) {
+    if (!button) return false;
+    try {
+      button.scrollIntoView({ block: "center", inline: "nearest" });
+    } catch {}
+
+    try {
+      button.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, view: window }));
+      button.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+      button.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      button.click();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return (async () => {
+    const maxWaitMs = Math.max(5000, Number(payload?.maxWaitMs) || 45000);
+    const start = Date.now();
+    let button = null;
+
+    while (Date.now() - start <= maxWaitMs) {
+      button = findButton();
+      if (button && isEnabled(button)) break;
+      await sleep(500);
+    }
+
+    if (!button || !isEnabled(button)) {
+      return {
+        ok: false,
+        clicked: false,
+        found: Boolean(button),
+        enabled: isEnabled(button),
+        waitedMs: Date.now() - start,
+        error: "Check feedback button is not available/enabled yet."
+      };
+    }
+
+    let clicked = false;
+    let clickAttempts = 0;
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      clickAttempts = attempt;
+      button = findButton();
+      if (!button || !isEnabled(button)) break;
+      clicked = clickRobust(button) || clicked;
+      await sleep(700);
+      const after = findButton();
+      if (!after || !isEnabled(after)) {
+        clicked = true;
+        break;
+      }
+    }
+
+    return {
+      ok: clicked,
+      clicked,
+      found: true,
+      enabled: isEnabled(findButton()),
+      waitedMs: Date.now() - start,
+      clickAttempts,
+      error: clicked ? null : "Check feedback button click did not take effect."
+    };
+  })();
+}
+
+async function clickCheckFeedbackOnActiveTab() {
+  setStatus("Status: Trying to click Check feedback on active tab...");
+  try {
+    const tab = await getActiveTab();
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      func: pageClickCheckFeedbackButton,
+      args: [{ maxWaitMs: 45000 }]
+    });
+
+    if (!result?.ok || !result?.clicked) {
+      throw new Error(result?.error || "Failed to click Check feedback.");
+    }
+
+    setStatus("Status: Check feedback clicked", "ok");
+  } catch (err) {
+    setStatus(`Status: Error - ${err?.message || String(err)}`, "error");
+  }
 }
 
 function createRevisionJobFromListItem(item) {
@@ -4053,6 +4340,19 @@ async function startRevisionJobFromListItem(listItem) {
       buildLogText: extracted.buildLogText || ""
     };
 
+    await cacheSnorkelExtractionForTab(job.snorkelTabId, extracted.currentPageUrl || job.snorkelRevisionUrl || "", {
+      zipFileName: extracted.sourceZipFileName || "",
+      difficulty: inferDifficultyFromSummaryText(extracted.summaryText || ""),
+      reviewerFeedbackText: extracted.reviewerFeedbackText || "",
+      summaryText: extracted.summaryText || "",
+      rubricText: extracted.rubricText || "",
+      difficultyExplanation: extracted.difficultyExplanation || "",
+      solutionExplanation: extracted.solutionExplanation || "",
+      verificationExplanation: extracted.verificationExplanation || "",
+      extractedAt: extracted.extractedAt || nowIso(),
+      currentPageUrl: extracted.currentPageUrl || job.snorkelRevisionUrl || ""
+    }, "revision-load");
+
     job.sourceZipOriginalName = extracted.sourceZipFileName || "";
     job.buildingErrorOriginalName = extracted.buildingErrorFileName || "";
     job.buildingErrorDownloadAvailable = Boolean(extracted.buildingErrorDownloadAvailable);
@@ -4385,7 +4685,7 @@ async function handleCompletedChatGptRevision(job) {
     // Snorkel usually enables "Check feedback" a few seconds after upload processing completes.
     await delay(6000);
 
-    await chrome.scripting.executeScript({
+    const [{ result: fillResult }] = await chrome.scripting.executeScript({
       target: { tabId: job.snorkelTabId },
       world: "MAIN",
       func: pageFillRevisionFormFromJob,
@@ -4399,7 +4699,13 @@ async function handleCompletedChatGptRevision(job) {
       }]
     });
 
-    logRevision("revision-form-filled", job);
+    logRevision("revision-form-filled", job, fillResult || {});
+
+    if (!fillResult?.checkFeedbackClicked) {
+      setRevisionStatus(job, "needs_manual_review", "Check feedback button was not clicked automatically.");
+      await refreshRevisionUiAndPersist();
+      return;
+    }
 
     setRevisionStatus(job, "done");
     await refreshRevisionUiAndPersist();
@@ -4591,6 +4897,7 @@ async function handleRevisionJobAction(action, jobId) {
         func: pageFillRevisionFormFromJob,
         args: [{
           normalizedFillData: job.normalizedFillData || {},
+          fallbackData: job.extractedData || {},
           options: {
             enableGenerateRubricAfterUpload: Boolean(revisionSettings.enableGenerateRubricAfterUpload),
             autoCheckSendReviewerAfterFixedUpload: Boolean(revisionSettings.autoCheckSendReviewerAfterFixedUpload)
@@ -4758,6 +5065,12 @@ if (resumeRevisionQueueBtn) {
   });
 }
 
+if (manualCheckFeedbackBtn) {
+  manualCheckFeedbackBtn.addEventListener("click", async () => {
+    await clickCheckFeedbackOnActiveTab();
+  });
+}
+
 if (clearFinishedRevisionJobsBtn) {
   clearFinishedRevisionJobsBtn.addEventListener("click", async () => {
     revisionJobs = [];
@@ -4780,6 +5093,16 @@ if (revisionJobsListEl) {
     await handleRevisionJobAction(action, jobId);
   });
 }
+
+chrome.tabs.onActivated.addListener(() => {
+  restoreCachedSnorkelExtractionForActiveTab().catch(() => {});
+});
+
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.status !== "complete") return;
+  if (!tab?.active) return;
+  restoreCachedSnorkelExtractionForActiveTab().catch(() => {});
+});
 
 copyFormattedBtn.addEventListener("click", () => {
   updateFormattedCopyState();
@@ -4804,9 +5127,10 @@ chrome.storage.local
     "revisionSessionRegistry",
     "revisionListState",
     "revisionSettings",
-    "sidebarActiveTab"
+    "sidebarActiveTab",
+    "snorkelExtractionCache"
   ])
-  .then(({ lastResult, chatgptUrl, lastChatgptJson, lastNormalizedFillData, reviewAhtMin, reviewAhtMax, revisionJobs: savedRevisionJobs, revisionSessionRegistry: savedSessionRegistry, revisionListState: savedRevisionListState, revisionSettings: savedRevisionSettings, sidebarActiveTab }) => {
+  .then(({ lastResult, chatgptUrl, lastChatgptJson, lastNormalizedFillData, reviewAhtMin, reviewAhtMax, revisionJobs: savedRevisionJobs, revisionSessionRegistry: savedSessionRegistry, revisionListState: savedRevisionListState, revisionSettings: savedRevisionSettings, sidebarActiveTab, snorkelExtractionCache: savedSnorkelExtractionCache }) => {
     chatgptUrlInput.value = String(chatgptUrl || DEFAULT_CHATGPT_URL);
 
     const reviewAhtRange = normalizeReviewAhtRange(reviewAhtMin, reviewAhtMax);
@@ -4833,6 +5157,12 @@ chrome.storage.local
   revisionSettings = savedRevisionSettings && typeof savedRevisionSettings === "object"
     ? { ...revisionSettings, ...savedRevisionSettings }
     : revisionSettings;
+  snorkelExtractionCache = savedSnorkelExtractionCache && typeof savedSnorkelExtractionCache === "object"
+    ? {
+      byTabId: savedSnorkelExtractionCache.byTabId && typeof savedSnorkelExtractionCache.byTabId === "object" ? savedSnorkelExtractionCache.byTabId : {},
+      byUrl: savedSnorkelExtractionCache.byUrl && typeof savedSnorkelExtractionCache.byUrl === "object" ? savedSnorkelExtractionCache.byUrl : {}
+    }
+    : { byTabId: {}, byUrl: {} };
 
   if (revisionChatgptUrlInput) revisionChatgptUrlInput.value = String(revisionSettings.revisionChatgptUrl || DEFAULT_REVISION_CHATGPT_URL);
   if (revisionBatchSizeInput) revisionBatchSizeInput.value = String(revisionSettings.revisionBatchSize || DEFAULT_REVISION_BATCH_SIZE);
@@ -4853,6 +5183,7 @@ chrome.storage.local
   updateRevisionQueueStats();
   renderRevisionJobs();
   setSidebarTab(sidebarActiveTab === "revision" ? "revision" : DEFAULT_SIDEBAR_TAB);
+  restoreCachedSnorkelExtractionForActiveTab().catch(() => {});
   ensureRevisionPolling();
 });
 
