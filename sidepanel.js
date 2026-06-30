@@ -2670,6 +2670,7 @@ let revisionStarterBusy = false;
 let lastPausedPollLogAt = 0;
 let revisionBatchScopeUrls = null;
 let revisionBatchActive = false;
+let revisionBatchTerminalUrls = new Set();
 
 function nowIso() {
   return new Date().toISOString();
@@ -2824,6 +2825,53 @@ async function persistRevisionState() {
 
 function removeRevisionJobFromList(jobId) {
   revisionJobs = revisionJobs.filter((job) => job.id !== jobId);
+}
+
+function isRevisionTerminalStatus(status) {
+  return REVISION_TERMINAL_STATUSES.has(String(status || ""));
+}
+
+function maybeMarkBatchTerminalForJob(job) {
+  const normalizedUrl = normalizeRevisionIdentity(job?.snorkelRevisionUrl || "");
+  if (!normalizedUrl || !revisionBatchScopeUrls?.has(normalizedUrl)) return;
+  if (!isRevisionTerminalStatus(job?.status)) return;
+
+  revisionBatchTerminalUrls.add(normalizedUrl);
+  logRevision("batch-terminal-marked", job, {
+    batchTerminalCount: revisionBatchTerminalUrls.size,
+    batchScopeCount: revisionBatchScopeUrls?.size || 0
+  });
+}
+
+function isRevisionBatchComplete() {
+  if (!revisionBatchActive || !revisionBatchScopeUrls?.size) return false;
+  return revisionBatchTerminalUrls.size >= revisionBatchScopeUrls.size;
+}
+
+async function finalizeRevisionBatchIfComplete() {
+  if (!isRevisionBatchComplete()) return false;
+
+  revisionBatchActive = false;
+  logRevision("batch-complete", {
+    batchTerminalCount: revisionBatchTerminalUrls.size,
+    batchScopeCount: revisionBatchScopeUrls?.size || 0
+  });
+  setStatus("Status: Revision batch completed", "ok");
+  await refreshRevisionUiAndPersist();
+  return true;
+}
+
+async function advanceRevisionBatchAfterTerminal(job, reason) {
+  maybeMarkBatchTerminalForJob(job);
+  const finished = await finalizeRevisionBatchIfComplete();
+  if (finished) return;
+
+  logRevision("batch-advance-after-terminal", job, {
+    reason,
+    batchTerminalCount: revisionBatchTerminalUrls.size,
+    batchScopeCount: revisionBatchScopeUrls?.size || 0
+  });
+  await processNextRevisionFromList();
 }
 
 function getRevisionChatGptUrl() {
@@ -4447,10 +4495,7 @@ async function startRevisionJobFromListItem(listItem) {
 
       setRevisionStatus(job, revisionSettings.autoSendNoFixRevisions ? "done" : "ready_to_send_reviewer");
       await refreshRevisionUiAndPersist();
-      if (revisionSettings.autoSendNoFixRevisions) {
-        removeRevisionJobFromList(job.id);
-        await refreshRevisionUiAndPersist();
-      }
+      await advanceRevisionBatchAfterTerminal(job, "no-fix-terminal");
       return job;
     }
 
@@ -4552,21 +4597,12 @@ async function startRevisionJobFromListItem(listItem) {
     logRevision("session-registry-updated", job, { chatGptSessionUrl: job.chatGptSessionUrl });
 
     await refreshRevisionUiAndPersist();
-    const handoffDelayMs = 4000;
-    logRevision("waiting-chatgpt-handoff", job, {
-      message: "Handing off to the next task without waiting for ChatGPT completion.",
-      handoffDelayMs
-    });
-    setTimeout(() => {
-      processNextRevisionFromList().catch((err) => {
-        logRevision("waiting-chatgpt-handoff-error", job, { error: err?.message || String(err) });
-      });
-    }, handoffDelayMs);
     return job;
   } catch (err) {
     logRevision("job-error", job, { error: err?.message || String(err) });
     setRevisionStatus(job, "error", err?.message || String(err));
     await refreshRevisionUiAndPersist();
+    await advanceRevisionBatchAfterTerminal(job, "start-job-error");
     return job;
   }
 }
@@ -4611,6 +4647,7 @@ async function processNextRevisionFromList(options = {}) {
       const listUuid = normalizeRevisionIdentity(item.listUuid || "");
       if (!url) return false;
       if (revisionBatchScopeUrls && !revisionBatchScopeUrls.has(url)) return false;
+      if (revisionBatchTerminalUrls.has(url)) return false;
       return !activeUrls.has(url)
         && !completedUrls.has(url)
         && !blockedErrorUrls.has(url)
@@ -4662,6 +4699,7 @@ async function startRevisionBatchFromList() {
 
   revisionBatchScopeUrls = new Set(selected.slice(0, target).map((it) => it.url));
   revisionBatchActive = true;
+  revisionBatchTerminalUrls = new Set();
   logRevision("start-batch-scope", {
     target,
     selectedCount: revisionBatchScopeUrls.size,
@@ -4794,17 +4832,18 @@ async function handleCompletedChatGptRevision(job) {
     if (!fillResult?.checkFeedbackClicked) {
       setRevisionStatus(job, "needs_manual_review", "Check feedback button was not clicked automatically.");
       await refreshRevisionUiAndPersist();
+      await advanceRevisionBatchAfterTerminal(job, "check-feedback-manual-review");
       return;
     }
 
     setRevisionStatus(job, "done");
     await refreshRevisionUiAndPersist();
-    removeRevisionJobFromList(job.id);
-    await refreshRevisionUiAndPersist();
+    await advanceRevisionBatchAfterTerminal(job, "revision-done");
   } catch (err) {
     logRevision("handle-chatgpt-complete-error", job, { error: err?.message || String(err) });
     setRevisionStatus(job, "error", err?.message || String(err));
     await refreshRevisionUiAndPersist();
+    await advanceRevisionBatchAfterTerminal(job, "chatgpt-complete-error");
   }
 }
 
