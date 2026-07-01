@@ -3355,7 +3355,12 @@ function classifyRevisionNeed(summaryText, reviewerFeedbackText) {
 
   const mediumOrHard = /difficulty\s*:\s*✅\s*(medium|hard)/i.test(summaryText || "");
   const solvable = /status\s*:\s*✅\s*solvable/i.test(summaryText || "");
+  const passedByAnyAgent = /all tests passed by at least one agent run/i.test(summaryText || "");
   const hasAutoEvalOnly = !feedback || /^autoeval/i.test(feedbackLower);
+
+  // If there is effectively no reviewer feedback and summary shows this task is solvable,
+  // no revision is needed: just click "Check feedback" and continue.
+  if (hasAutoEvalOnly && (solvable || passedByAnyAgent)) return "NO_FIX_NEEDED";
 
   if (mediumOrHard && solvable && hasAutoEvalOnly) return "NO_FIX_NEEDED";
 
@@ -3381,12 +3386,41 @@ function pageHandleNoFixRevision({ autoSend }) {
   }
 
   function findButtonByText(candidates) {
-    const buttons = Array.from(document.querySelectorAll("button"));
-    for (const btn of buttons) {
+    const buttons = Array.from(document.querySelectorAll("button, [role='button']"));
+    const normalizedCandidates = candidates.map((item) => norm(item));
+
+    const matches = buttons.filter((btn) => {
       const text = norm(btn.innerText || btn.textContent || "");
-      if (candidates.some((item) => text === norm(item) || text.includes(norm(item)))) return btn;
+      const aria = norm(btn.getAttribute("aria-label") || "");
+      const title = norm(btn.getAttribute("title") || "");
+      const combined = `${text} ${aria} ${title}`.trim();
+      return normalizedCandidates.some((item) => combined === item || combined.includes(item));
+    });
+
+    const enabled = matches.find((btn) => {
+      const ariaDisabled = String(btn.getAttribute("aria-disabled") || "").toLowerCase();
+      const style = window.getComputedStyle(btn);
+      return !btn.disabled && ariaDisabled !== "true" && style.display !== "none" && style.visibility !== "hidden";
+    });
+
+    return enabled || matches[0] || null;
+  }
+
+  function clickRobust(el) {
+    if (!el) return false;
+    try {
+      el.scrollIntoView({ block: "center", inline: "nearest" });
+    } catch {}
+    try {
+      el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      if (typeof el.click === "function") el.click();
+      return true;
+    } catch {
+      return false;
     }
-    return null;
   }
 
   function ensureCheckbox(fieldTestId, labelText) {
@@ -3400,11 +3434,16 @@ function pageHandleNoFixRevision({ autoSend }) {
   }
 
   return (async () => {
-    const checkBtn = findButtonByText(["Check feedback", "Check Feedback"]);
-    if (checkBtn) {
-      checkBtn.click();
-      await sleep(500);
+    let checkBtn = null;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt <= 30000) {
+      checkBtn = findButtonByText(["Check feedback", "Check Feedback", "Check difficulty", "Check Difficult"]);
+      if (checkBtn) break;
+      await sleep(300);
     }
+
+    const clicked = clickRobust(checkBtn);
+    await sleep(500);
 
     ensureCheckbox("field-checkbox_send_to_reviewer", "send to reviewer");
     if (autoSend) {
@@ -3412,7 +3451,7 @@ function pageHandleNoFixRevision({ autoSend }) {
       if (sendBtn) sendBtn.click();
     }
 
-    return { ok: true };
+    return { ok: true, checkButtonFound: Boolean(checkBtn), checkButtonClicked: clicked };
   })();
 }
 
@@ -4214,7 +4253,6 @@ function createRevisionJobFromListItem(item) {
     chatGptResponseText: "",
     chatGptResponseJson: null,
     normalizedFillData: null,
-    checkFeedbackRestartCount: 0,
     error: null,
     createdAt: nowIso(),
     updatedAt: nowIso()
@@ -4914,8 +4952,9 @@ async function handleCompletedChatGptRevision(job) {
     logRevision("revised-zip-upload-result", job, uploadResult || {});
 
     if (!uploadResult?.ok) {
-      setRevisionStatus(job, "needs_manual_review", uploadResult?.error || "Failed to upload revised ZIP.");
+      setRevisionStatus(job, "error", uploadResult?.error || "Failed to upload revised ZIP.");
       await refreshRevisionUiAndPersist();
+      await advanceRevisionBatchAfterTerminal(job, "upload-revised-zip-failed");
       return;
     }
 
@@ -4943,24 +4982,9 @@ async function handleCompletedChatGptRevision(job) {
     logRevision("revision-form-filled", job, fillResult || {});
 
     if (!fillResult?.checkFeedbackClicked) {
-      const restartCount = Number(job.checkFeedbackRestartCount || 0);
-      if (restartCount < 1) {
-        job.checkFeedbackRestartCount = restartCount + 1;
-        setRevisionStatus(job, "queued", "Check feedback button was not clicked. Restarting whole task once.");
-        await closeRevisionJobTabs(job);
-        await refreshRevisionUiAndPersist();
-        await startRevisionJobFromListItem({
-          listUuid: job.listUuid || "",
-          projectName: job.projectName || "",
-          href: job.snorkelRevisionUrl || "",
-          absoluteUrl: job.snorkelRevisionUrl || ""
-        });
-        return;
-      }
-
-      setRevisionStatus(job, "needs_manual_review", "Check feedback button was not clicked automatically.");
+      setRevisionStatus(job, "error", "Check feedback button was not clicked automatically.");
       await refreshRevisionUiAndPersist();
-      await advanceRevisionBatchAfterTerminal(job, "check-feedback-manual-review");
+      await advanceRevisionBatchAfterTerminal(job, "check-feedback-click-failed");
       return;
     }
 
@@ -5024,6 +5048,7 @@ async function pollRevisionJobs() {
       logRevision("poll-job-error", job, { error: err?.message || String(err) });
       setRevisionStatus(job, "error", err?.message || String(err));
       await refreshRevisionUiAndPersist();
+      await advanceRevisionBatchAfterTerminal(job, "poll-job-error");
     }
   }
 
