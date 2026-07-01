@@ -3792,13 +3792,13 @@ function pageUploadRevisedZipToRevisionForm(fileDef) {
     if (!removeButton) return;
 
     removeButton.click();
-    await sleep(200);
+    await sleep(1000);
 
     const dialog = document.querySelector('[data-testid="dialog-content"], [role="alertdialog"]') || document;
     const confirm = Array.from(dialog.querySelectorAll("button")).find((btn) => /remove file/i.test(btn.innerText || btn.textContent || ""));
     if (confirm) {
       confirm.click();
-      await sleep(300);
+      await sleep(1000);
     }
   }
 
@@ -4944,6 +4944,12 @@ async function handleCompletedChatGptRevision(job) {
     if (job.snorkelWindowId) await chrome.windows.update(job.snorkelWindowId, { focused: true });
     await waitForTabComplete(job.snorkelTabId, 30000);
 
+    await chrome.scripting.executeScript({
+      target: { tabId: job.snorkelTabId },
+      world: "MAIN",
+      func: pageForceScrollToTop
+    });
+
     const [{ result: uploadResult }] = await chrome.scripting.executeScript({
       target: { tabId: job.snorkelTabId },
       world: "MAIN",
@@ -4959,6 +4965,14 @@ async function handleCompletedChatGptRevision(job) {
       await advanceRevisionBatchAfterTerminal(job, "upload-revised-zip-failed");
       return;
     }
+
+    await delay(2000);
+
+    await chrome.scripting.executeScript({
+      target: { tabId: job.snorkelTabId },
+      world: "MAIN",
+      func: pageForceScrollToTop
+    });
 
     setRevisionStatus(job, "filling_revision");
     await refreshRevisionUiAndPersist();
