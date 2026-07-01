@@ -3357,15 +3357,18 @@ function classifyRevisionNeed(summaryText, reviewerFeedbackText) {
   const solvable = /status\s*:\s*✅\s*solvable/i.test(summaryText || "");
   const passedByAnyAgent = /all tests passed by at least one agent run/i.test(summaryText || "");
   const hasAutoEvalOnly = !feedback || /^autoeval/i.test(feedbackLower);
+  const difficultyTooLow = /difficulty\s*:\s*❌\s*(trivial|easy)/i.test(summaryText || "");
+
+  // Difficulty failure must always go through FIX path even if solvable.
+  if (difficultyTooLow) return "FIX_NEEDED";
 
   // If there is effectively no reviewer feedback and summary shows this task is solvable,
   // no revision is needed: just click "Check feedback" and continue.
-  if (hasAutoEvalOnly && (solvable || passedByAnyAgent)) return "NO_FIX_NEEDED";
+  if (mediumOrHard && hasAutoEvalOnly && (solvable || passedByAnyAgent)) return "NO_FIX_NEEDED";
 
   if (mediumOrHard && solvable && hasAutoEvalOnly) return "NO_FIX_NEEDED";
 
   const obviousFix =
-    /difficulty\s*:\s*❌\s*(trivial|easy)/i.test(summaryText || "") ||
     /status\s*:\s*❌/i.test(summaryText || "") ||
     /oracle solution failed|not tested with any agents|some tests not passed/i.test(summary) ||
     (feedback && !/^autoeval/i.test(feedbackLower));
@@ -4430,7 +4433,6 @@ function getMissingRevisionDataFields(extracted, job = null) {
   const knownTaskUuid = String(extracted?.taskUuid || job?.taskUuid || job?.listUuid || "").trim();
   if (!knownTaskUuid) missing.push("taskUuid");
   if (!String(extracted?.summaryText || "").trim()) missing.push("summaryText");
-  if (!String(extracted?.reviewerFeedbackText || "").trim()) missing.push("reviewerFeedbackText");
   if (!String(extracted?.rubricText || "").trim()) missing.push("rubricText");
   if (!String(extracted?.sourceZipFileName || "").trim()) missing.push("sourceZipFileName");
   return missing;
