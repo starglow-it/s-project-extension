@@ -3929,33 +3929,16 @@ function pageFillRevisionFormFromJob(payload) {
     });
 
     const waitStart = Date.now();
-    const maxWaitMs = Math.max(10000, Number(opts.checkFeedbackWaitMs) || 45000);
-    while (Date.now() - waitStart <= maxWaitMs) {
-      checkButton = findCheckFeedbackButton();
-      if (checkButton && isButtonEnabled(checkButton)) break;
-
-      // Keep explanations populated while the button is disabled and backend validation is pending.
-      fillField("field-difficulty_explanation", resolvedDifficulty, "difficulty_explanation");
-      fillField("field-solution_explanation", resolvedSolution, "solution_explanation");
-      fillField("field-verification_explanation", resolvedVerification, "verification_explanation");
-      await sleep(500);
-    }
+    const waitMs = Math.max(5000, Number(opts.checkFeedbackWaitMs) || 10000);
+    await sleep(waitMs);
+    checkButton = findCheckFeedbackButton();
 
     let clicked = false;
     let clickAttempts = 0;
     if (checkButton && isButtonEnabled(checkButton)) {
-      for (let attempt = 1; attempt <= 6; attempt += 1) {
-        clickAttempts = attempt;
-        checkButton = findCheckFeedbackButton();
-        if (!checkButton || !isButtonEnabled(checkButton)) break;
-        clicked = clickButtonRobust(checkButton) || clicked;
-        await sleep(700);
-        const after = findCheckFeedbackButton();
-        if (!after || !isButtonEnabled(after)) {
-          clicked = true;
-          break;
-        }
-      }
+      clickAttempts = 1;
+      clicked = clickButtonRobust(checkButton);
+      await sleep(500);
     }
 
     if (clicked) {
@@ -4144,6 +4127,7 @@ function createRevisionJobFromListItem(item) {
     chatGptResponseText: "",
     chatGptResponseJson: null,
     normalizedFillData: null,
+    checkFeedbackRestartCount: 0,
     error: null,
     createdAt: nowIso(),
     updatedAt: nowIso()
@@ -4723,6 +4707,18 @@ async function startRevisionBatchFromList() {
   await processNextRevisionFromList();
 }
 
+async function closeRevisionJobTabs(job) {
+  const ids = [job?.snorkelTabId, job?.chatGptTabId]
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+
+  for (const tabId of ids) {
+    try {
+      await chrome.tabs.remove(tabId);
+    } catch {}
+  }
+}
+
 async function handleCompletedChatGptRevision(job) {
   try {
     logRevision("handle-chatgpt-complete-start", job);
@@ -4824,46 +4820,42 @@ async function handleCompletedChatGptRevision(job) {
     setRevisionStatus(job, "filling_revision");
     await refreshRevisionUiAndPersist();
 
-    const maxFillAttempts = 3;
-    let fillResult = null;
-    for (let attempt = 1; attempt <= maxFillAttempts; attempt += 1) {
-      // Snorkel often needs a few seconds after upload before "Check feedback" becomes clickable.
-      await delay(attempt === 1 ? 6000 : 8000);
+    await delay(7000);
 
-      const [{ result }] = await chrome.scripting.executeScript({
-        target: { tabId: job.snorkelTabId },
-        world: "MAIN",
-        func: pageFillRevisionFormFromJob,
-        args: [{
-          normalizedFillData: job.normalizedFillData || {},
-          fallbackData: job.extractedData || {},
-          options: {
-            enableGenerateRubricAfterUpload: Boolean(revisionSettings.enableGenerateRubricAfterUpload),
-            autoCheckSendReviewerAfterFixedUpload: Boolean(revisionSettings.autoCheckSendReviewerAfterFixedUpload),
-            checkFeedbackWaitMs: 60000
-          }
-        }]
-      });
+    const [{ result: fillResult }] = await chrome.scripting.executeScript({
+      target: { tabId: job.snorkelTabId },
+      world: "MAIN",
+      func: pageFillRevisionFormFromJob,
+      args: [{
+        normalizedFillData: job.normalizedFillData || {},
+        fallbackData: job.extractedData || {},
+        options: {
+          enableGenerateRubricAfterUpload: Boolean(revisionSettings.enableGenerateRubricAfterUpload),
+          autoCheckSendReviewerAfterFixedUpload: Boolean(revisionSettings.autoCheckSendReviewerAfterFixedUpload),
+          checkFeedbackWaitMs: 10000
+        }
+      }]
+    });
 
-      fillResult = result || null;
-      logRevision("revision-form-filled", job, {
-        attempt,
-        ...(fillResult || {})
-      });
-
-      if (fillResult?.checkFeedbackClicked) break;
-
-      if (attempt < maxFillAttempts) {
-        logRevision("revision-form-retry", job, {
-          attempt,
-          maxFillAttempts,
-          reason: "Check feedback button was not clicked yet. Retrying same task."
-        });
-      }
-    }
+    logRevision("revision-form-filled", job, fillResult || {});
 
     if (!fillResult?.checkFeedbackClicked) {
-      setRevisionStatus(job, "needs_manual_review", "Check feedback button was not clicked automatically after retries.");
+      const restartCount = Number(job.checkFeedbackRestartCount || 0);
+      if (restartCount < 1) {
+        job.checkFeedbackRestartCount = restartCount + 1;
+        setRevisionStatus(job, "queued", "Check feedback button was not clicked. Restarting whole task once.");
+        await closeRevisionJobTabs(job);
+        await refreshRevisionUiAndPersist();
+        await startRevisionJobFromListItem({
+          listUuid: job.listUuid || "",
+          projectName: job.projectName || "",
+          href: job.snorkelRevisionUrl || "",
+          absoluteUrl: job.snorkelRevisionUrl || ""
+        });
+        return;
+      }
+
+      setRevisionStatus(job, "needs_manual_review", "Check feedback button was not clicked automatically.");
       await refreshRevisionUiAndPersist();
       await advanceRevisionBatchAfterTerminal(job, "check-feedback-manual-review");
       return;
