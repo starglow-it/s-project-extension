@@ -2211,7 +2211,7 @@ async function runChatGptForData(data, tabId) {
 
   const firstPrompt = buildChatGptPrompt(data);
   const secondPrompt =
-    `give me as JSON only in code tag. {"review_decision": "Accept or Needs Revision","high_quality_submission": false,"low_quality_submission": false,"acceptance_notes": "","revision_message": "This message should be return to task creator. it needs to help him to fix the issues.","error_categories": []}. Allowed categories: ["Instruction Styling","Test Alignment/Coverage Issues","Exposing Hints/Answers","Oracle Solution Issues","Test Build Issues","Time Based Tests","Task Difficulty","Metadata Issues","Milestones","Uses Internet","Agent Timeout","Wrong Coding Language","Canary Strings","Rubric","Test Dependency Location","Pinning Issues","Environment","Other"].  select categories as max 3.`;
+    `give me as JSON only in code tag. {"review_decision": "Accept or Needs Revision","high_quality_submission": false,"low_quality_submission": false,"acceptance_notes": "","revision_message": "This message should be return to task creator. it needs to help him to fix the issues. give me human style answer as reviewer to leave feedback to creator","error_categories": []}. Allowed categories: ["Instruction Styling","Test Alignment/Coverage Issues","Exposing Hints/Answers","Oracle Solution Issues","Test Build Issues","Time Based Tests","Task Difficulty","Metadata Issues","Milestones","Uses Internet","Agent Timeout","Wrong Coding Language","Canary Strings","Rubric","Test Dependency Location","Pinning Issues","Environment","Other"].  select categories as max 3.`;
 
 
   async function fetchWithRetry(url, options = {}, retries = 10, delayMs = 1200) {
@@ -3362,6 +3362,10 @@ function classifyRevisionNeed(summaryText, reviewerFeedbackText) {
   return "FIX_NEEDED";
 }
 
+function shouldDownloadDifficultyCheckFile(summaryText) {
+  return /Status:\s*❌\s*Some tests not passed by any agent run/i.test(String(summaryText || ""));
+}
+
 function pageHandleNoFixRevision({ autoSend }) {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -4502,6 +4506,12 @@ async function startRevisionJobFromListItem(listItem) {
     setRevisionStatus(job, "downloading_files");
     await refreshRevisionUiAndPersist();
 
+    const needsDifficultyCheckFile = shouldDownloadDifficultyCheckFile(job.extractedData.summaryText);
+    logRevision("difficulty-check-download-decision", job, {
+      summaryPreview: String(job.extractedData.summaryText || "").slice(0, 200),
+      needsDifficultyCheckFile
+    });
+
     if (job.sourceZipOriginalName) {
       const sourceName = job.sourceZipOriginalName;
       const sourceDownload = await registerAndWaitDownload(job, job.snorkelTabId, "source_zip", sourceName, pageDownloadRevisionSourceZip);
@@ -4510,14 +4520,18 @@ async function startRevisionJobFromListItem(listItem) {
       logRevision("source-zip-downloaded", job, { filename: job.sourceZipDownloadedName, fileApiUrl: job.sourceZipFileApiUrl });
     }
 
-    if (job.buildingErrorDownloadAvailable || job.buildingErrorOriginalName) {
+    if (needsDifficultyCheckFile && (job.buildingErrorDownloadAvailable || job.buildingErrorOriginalName)) {
       const buildName = job.buildingErrorOriginalName || `${job.taskUuid || "task"}_difficulty_check_artifact_${Date.now()}.zip`;
       const buildDownload = await registerAndWaitDownload(job, job.snorkelTabId, "building_error", buildName, pageDownloadRevisionBuildingError);
       job.buildingErrorDownloadedName = buildDownload.filename || buildName;
       job.buildingErrorFileApiUrl = buildFileApiUrl(job.buildingErrorDownloadedName);
       logRevision("building-error-downloaded", job, { filename: job.buildingErrorDownloadedName, fileApiUrl: job.buildingErrorFileApiUrl });
     } else {
-      logRevision("building-error-skip-unavailable", job, { message: "No enabled difficulty check result download button was found." });
+      logRevision("building-error-skip-unavailable", job, {
+        message: needsDifficultyCheckFile
+          ? "No enabled difficulty check result download button was found."
+          : "Reviewer feedback does not start with AutoEval; skipping difficult check file download."
+      });
     }
 
     setRevisionStatus(job, "opening_chatgpt");
@@ -4810,27 +4824,46 @@ async function handleCompletedChatGptRevision(job) {
     setRevisionStatus(job, "filling_revision");
     await refreshRevisionUiAndPersist();
 
-    // Snorkel usually enables "Check feedback" a few seconds after upload processing completes.
-    await delay(6000);
+    const maxFillAttempts = 3;
+    let fillResult = null;
+    for (let attempt = 1; attempt <= maxFillAttempts; attempt += 1) {
+      // Snorkel often needs a few seconds after upload before "Check feedback" becomes clickable.
+      await delay(attempt === 1 ? 6000 : 8000);
 
-    const [{ result: fillResult }] = await chrome.scripting.executeScript({
-      target: { tabId: job.snorkelTabId },
-      world: "MAIN",
-      func: pageFillRevisionFormFromJob,
-      args: [{
-        normalizedFillData: job.normalizedFillData || {},
-        fallbackData: job.extractedData || {},
-        options: {
-          enableGenerateRubricAfterUpload: Boolean(revisionSettings.enableGenerateRubricAfterUpload),
-          autoCheckSendReviewerAfterFixedUpload: Boolean(revisionSettings.autoCheckSendReviewerAfterFixedUpload)
-        }
-      }]
-    });
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId: job.snorkelTabId },
+        world: "MAIN",
+        func: pageFillRevisionFormFromJob,
+        args: [{
+          normalizedFillData: job.normalizedFillData || {},
+          fallbackData: job.extractedData || {},
+          options: {
+            enableGenerateRubricAfterUpload: Boolean(revisionSettings.enableGenerateRubricAfterUpload),
+            autoCheckSendReviewerAfterFixedUpload: Boolean(revisionSettings.autoCheckSendReviewerAfterFixedUpload),
+            checkFeedbackWaitMs: 60000
+          }
+        }]
+      });
 
-    logRevision("revision-form-filled", job, fillResult || {});
+      fillResult = result || null;
+      logRevision("revision-form-filled", job, {
+        attempt,
+        ...(fillResult || {})
+      });
+
+      if (fillResult?.checkFeedbackClicked) break;
+
+      if (attempt < maxFillAttempts) {
+        logRevision("revision-form-retry", job, {
+          attempt,
+          maxFillAttempts,
+          reason: "Check feedback button was not clicked yet. Retrying same task."
+        });
+      }
+    }
 
     if (!fillResult?.checkFeedbackClicked) {
-      setRevisionStatus(job, "needs_manual_review", "Check feedback button was not clicked automatically.");
+      setRevisionStatus(job, "needs_manual_review", "Check feedback button was not clicked automatically after retries.");
       await refreshRevisionUiAndPersist();
       await advanceRevisionBatchAfterTerminal(job, "check-feedback-manual-review");
       return;
